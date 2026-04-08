@@ -24,7 +24,6 @@ torch>=2.2
 # ML Models
 scikit-learn>=1.4
 xgboost>=2.0
-autogluon.tabular>=1.1
 shap>=0.45
 lime>=0.2
 

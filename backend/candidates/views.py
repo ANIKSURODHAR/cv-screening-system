@@ -1,8 +1,6 @@
 """
-Views for candidate applications:
-- Candidate: apply to job, view own applications + scores
-- Recruiter: view applicants for own jobs, shortlist/reject
-- Admin: view all applications
+Candidate application views — apply, list, score details.
+Scoring runs synchronously (direct) or via Celery (if available).
 """
 from rest_framework import generics, status, permissions
 from rest_framework.response import Response
@@ -20,7 +18,7 @@ from accounts.permissions import IsAdmin, IsRecruiter, IsCandidate, IsAdminOrRec
 # ─── Candidate Views ─────────────────────────────────────────
 
 class CandidateApplyView(generics.CreateAPIView):
-    """POST /api/candidates/apply/ — Candidate applies to a job with CV."""
+    """POST /api/candidates/apply/ — Apply to a job with CV."""
 
     serializer_class = ApplicationCreateSerializer
     permission_classes = [IsCandidate]
@@ -30,21 +28,34 @@ class CandidateApplyView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         application = serializer.save()
 
-        # Trigger async ML scoring pipeline
-        from ml_engine.tasks import score_application
-        score_application.delay(application.id)
+        # Run scoring — try Celery first, fallback to sync
+        scoring_method = "sync"
+        try:
+            from ml_engine.tasks import score_application
+            score_application.delay(application.id)
+            scoring_method = "async (Celery)"
+        except Exception:
+            # Celery unavailable — run directly
+            try:
+                from ml_engine.pipeline import run_scoring_pipeline
+                run_scoring_pipeline(application.id)
+                scoring_method = "sync (direct)"
+            except Exception as e:
+                # Scoring failed but application is saved
+                scoring_method = f"failed: {e}"
 
         return Response(
             {
                 "message": "Application submitted! AI scoring in progress...",
                 "application_id": application.id,
+                "scoring_method": scoring_method,
             },
             status=status.HTTP_201_CREATED,
         )
 
 
 class CandidateApplicationsView(generics.ListAPIView):
-    """GET /api/candidates/my-applications/ — Candidate's own applications."""
+    """GET /api/candidates/my-applications/"""
 
     serializer_class = ApplicationListSerializer
     permission_classes = [IsCandidate]
@@ -56,7 +67,7 @@ class CandidateApplicationsView(generics.ListAPIView):
 
 
 class CandidateApplicationDetailView(generics.RetrieveAPIView):
-    """GET /api/candidates/my-applications/<id>/ — Full score breakdown."""
+    """GET /api/candidates/my-applications/<id>/"""
 
     serializer_class = ApplicationDetailSerializer
     permission_classes = [IsCandidate]
@@ -70,7 +81,7 @@ class CandidateApplicationDetailView(generics.RetrieveAPIView):
 # ─── Recruiter Views ─────────────────────────────────────────
 
 class RecruiterApplicantsView(generics.ListAPIView):
-    """GET /api/candidates/job/<job_id>/applicants/ — Applicants for a recruiter's job."""
+    """GET /api/candidates/job/<job_id>/applicants/"""
 
     serializer_class = ApplicationListSerializer
     permission_classes = [IsAdminOrRecruiter]
@@ -80,17 +91,13 @@ class RecruiterApplicantsView(generics.ListAPIView):
         qs = Application.objects.filter(
             job_id=job_id
         ).select_related("candidate", "job", "score")
-
-        # Recruiter can only see their own jobs
         if self.request.user.is_recruiter:
             qs = qs.filter(job__recruiter=self.request.user)
-
-        # Sort by overall score descending (AI ranking)
         return qs.order_by("-score__overall_score")
 
 
 class RecruiterApplicantDetailView(generics.RetrieveAPIView):
-    """GET /api/candidates/applicant/<id>/ — Full applicant score detail."""
+    """GET /api/candidates/applicant/<id>/"""
 
     serializer_class = ApplicationDetailSerializer
     permission_classes = [IsAdminOrRecruiter]
@@ -103,7 +110,7 @@ class RecruiterApplicantDetailView(generics.RetrieveAPIView):
 
 
 class RecruiterUpdateStatusView(generics.UpdateAPIView):
-    """PATCH /api/candidates/applicant/<id>/status/ — Shortlist/reject."""
+    """PATCH /api/candidates/applicant/<id>/status/"""
 
     serializer_class = ApplicationStatusSerializer
     permission_classes = [IsAdminOrRecruiter]
@@ -118,7 +125,7 @@ class RecruiterUpdateStatusView(generics.UpdateAPIView):
 # ─── Admin Views ──────────────────────────────────────────────
 
 class AdminAllApplicationsView(generics.ListAPIView):
-    """GET /api/candidates/admin/all/ — Admin sees all applications."""
+    """GET /api/candidates/admin/all/"""
 
     serializer_class = ApplicationListSerializer
     permission_classes = [IsAdmin]

@@ -1,175 +1,104 @@
 """
-STEP 4: Feature Engineering
+STEP 4: Feature Engineering — BERT-Only (Best Accuracy)
 
-Convert CV text + job description → numerical feature vectors.
+Uses sentence-transformers to generate dense 384-dim embeddings.
+No TF-IDF — BERT captures both keywords AND semantic meaning.
 
-Two-pronged approach:
-  1. TF-IDF Vectorizer → sparse features (~500 dims) — captures keyword overlap
-  2. BERT Sentence Embeddings → dense features (768 dims) — captures semantic meaning
-
-Final: Concatenate both → 1268-dim feature vector per CV-job pair.
-
-Also includes:
-  - Cosine similarity between CV and job description
-  - Structured features (years exp, education level, skill count)
+Feature vector per CV-job pair:
+  - CV embedding (384d)
+  - Job embedding (384d)
+  - CV * Job element-wise (384d) — interaction features
+  - |CV - Job| absolute diff (384d) — gap features
+  - Cosine similarity (1d)
+  - Structured features (12d)
+  Total: 1549 dims
 """
 import os
 import pickle
 import logging
 import numpy as np
-from typing import Dict, Tuple, Optional
-
+from typing import Dict
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
-# Paths for saved vectorizers
-TFIDF_PATH = os.path.join(settings.ML_MODELS_DIR, "tfidf_vectorizer.pkl")
+BERT_MODEL_NAME = "all-MiniLM-L6-v2"
+_model_cache = {}
 
 
-def get_tfidf_features(cv_text: str, job_text: str) -> np.ndarray:
-    """
-    Generate TF-IDF feature vector for a CV-job pair.
+def get_bert_model():
+    """Load BERT model with caching (loads once, reuses)."""
+    if "bert" not in _model_cache:
+        try:
+            import torch
+            # Force CPU to avoid macOS Metal GPU crash
+            os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+            if hasattr(torch.backends, "mps"):
+                os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
-    If a pre-trained vectorizer exists, use it.
-    Otherwise, create a new one on-the-fly.
-    """
-    try:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        from sklearn.metrics.pairwise import cosine_similarity
-
-        # Try to load pre-trained vectorizer
-        if os.path.exists(TFIDF_PATH):
-            with open(TFIDF_PATH, "rb") as f:
-                vectorizer = pickle.load(f)
-            vectors = vectorizer.transform([cv_text, job_text])
-        else:
-            # Create new vectorizer (will be saved during training)
-            vectorizer = TfidfVectorizer(
-                max_features=500,
-                stop_words="english",
-                ngram_range=(1, 2),
-                min_df=1,
-                max_df=0.95,
+            from sentence_transformers import SentenceTransformer
+            _model_cache["bert"] = SentenceTransformer(
+                BERT_MODEL_NAME,
+                device="cpu",  # Force CPU — works everywhere
             )
-            vectors = vectorizer.fit_transform([cv_text, job_text])
-
-        cv_vector = vectors[0].toarray().flatten()
-        job_vector = vectors[1].toarray().flatten()
-
-        # Cosine similarity as an additional feature
-        similarity = cosine_similarity(
-            cv_vector.reshape(1, -1),
-            job_vector.reshape(1, -1),
-        )[0][0]
-
-        # Combine: CV vector + job vector + similarity
-        # Pad/truncate to 500 dims
-        target_dim = 250
-        cv_feat = cv_vector[:target_dim] if len(cv_vector) >= target_dim else np.pad(
-            cv_vector, (0, target_dim - len(cv_vector))
-        )
-        job_feat = job_vector[:target_dim] if len(job_vector) >= target_dim else np.pad(
-            job_vector, (0, target_dim - len(job_vector))
-        )
-
-        return np.concatenate([cv_feat, job_feat, [similarity]])
-
-    except Exception as e:
-        logger.error(f"TF-IDF feature extraction failed: {e}")
-        return np.zeros(501)
+            logger.info(f"BERT model loaded: {BERT_MODEL_NAME} (CPU)")
+        except ImportError:
+            logger.warning("sentence-transformers not installed")
+            _model_cache["bert"] = None
+        except Exception as e:
+            logger.error(f"BERT load failed: {e}")
+            _model_cache["bert"] = None
+    return _model_cache["bert"]
 
 
-def get_bert_embeddings(cv_text: str, job_text: str) -> np.ndarray:
-    """
-    Generate BERT sentence embeddings for CV and job description.
-    Uses sentence-transformers for efficient encoding.
+def get_bert_embeddings(text: str) -> np.ndarray:
+    """Get BERT embedding for a single text. Returns 384-dim vector."""
+    model = get_bert_model()
+    if model is None:
+        return np.zeros(384)
 
-    Returns concatenated [CV_embedding, Job_embedding, cosine_sim] = 768+768+1 = 1537 dims
-    Truncated to 768 dims via mean pooling of CV+Job.
-    """
     try:
-        from sentence_transformers import SentenceTransformer
-
-        model = SentenceTransformer("all-MiniLM-L6-v2")  # Fast & good quality
-
-        # Truncate texts to model's max length
-        cv_truncated = cv_text[:5000]
-        job_truncated = job_text[:2000]
-
-        embeddings = model.encode(
-            [cv_truncated, job_truncated],
+        truncated = text[:5000]  # BERT max ~512 tokens
+        embedding = model.encode(
+            [truncated],
             show_progress_bar=False,
             convert_to_numpy=True,
+            device="cpu",
         )
-
-        cv_emb = embeddings[0]   # 384 dims for MiniLM (or 768 for full BERT)
-        job_emb = embeddings[1]
-
-        # Cosine similarity
-        similarity = np.dot(cv_emb, job_emb) / (
-            np.linalg.norm(cv_emb) * np.linalg.norm(job_emb) + 1e-8
-        )
-
-        # Combine via element-wise operations
-        combined = np.concatenate([
-            cv_emb,
-            job_emb,
-            cv_emb * job_emb,        # Element-wise interaction
-            np.abs(cv_emb - job_emb),  # Absolute difference
-            [similarity],
-        ])
-
-        return combined
-
-    except ImportError:
-        logger.warning("sentence-transformers not installed, using zero embeddings")
-        return np.zeros(384 * 4 + 1)
+        return embedding[0]
     except Exception as e:
-        logger.error(f"BERT embedding failed: {e}")
-        return np.zeros(384 * 4 + 1)
+        logger.error(f"BERT encoding failed: {e}")
+        return np.zeros(384)
 
 
 def get_structured_features(nlp_data: Dict, job_hard_reqs: list) -> np.ndarray:
     """
-    Create structured (hand-crafted) features from NLP output.
-
-    Features:
-    - Total skills count
-    - Skills per category count
-    - Education level (numeric)
-    - Experience years
-    - Hard requirement match ratio
-    - Word count
+    Hand-crafted features from NLP output (12 dims).
+    These capture information BERT can't: skill counts, education level, years.
     """
     features = []
 
-    # Skill counts
+    # Skill counts by category
     skills = nlp_data.get("skills", [])
-    features.append(len(skills))
+    features.append(len(skills))  # Total skills
 
-    # Skills by category
     categories = ["programming", "frameworks", "ml_ai", "data", "cloud_devops", "databases", "other"]
     for cat in categories:
         count = sum(1 for s in skills if s.get("category") == cat)
         features.append(count)
 
-    # Education level
+    # Education level (0-4)
     education = nlp_data.get("education", [])
-    max_edu = max(
-        (e.get("numeric_level", 0) for e in education),
-        default=0,
-    )
+    max_edu = max((e.get("numeric_level", 0) for e in education), default=0)
     features.append(max_edu)
 
     # Experience years
     features.append(nlp_data.get("experience_years", 0))
 
     # Word count (normalized)
-    word_count = nlp_data.get("word_count", 0)
-    features.append(min(word_count / 1000, 5.0))
+    features.append(min(nlp_data.get("word_count", 0) / 1000, 5.0))
 
-    # Hard requirement match ratio (pre-computed feature)
+    # Hard requirement match ratio
     if job_hard_reqs:
         skill_names = {s["skill"].lower() for s in skills}
         matched = sum(
@@ -190,33 +119,42 @@ def build_feature_vector(
     job_hard_reqs: list,
 ) -> np.ndarray:
     """
-    Build the complete feature vector by concatenating:
-      1. TF-IDF features (~501 dims)
-      2. BERT embeddings (~1537 dims)
-      3. Structured features (~12 dims)
+    Build BERT-based feature vector.
 
-    Total: ~2050 dims
+    Returns ~1549 dim vector:
+      384 (CV emb) + 384 (Job emb) + 384 (interaction) + 384 (diff) + 1 (cosine) + 12 (structured)
     """
-    logger.info("Building feature vector...")
+    logger.info("Building BERT feature vector...")
 
-    tfidf_feats = get_tfidf_features(cv_text, job_text)
-    bert_feats = get_bert_embeddings(cv_text, job_text)
+    # BERT embeddings
+    cv_emb = get_bert_embeddings(cv_text)
+    job_emb = get_bert_embeddings(job_text)
+
+    # Cosine similarity
+    norm_product = np.linalg.norm(cv_emb) * np.linalg.norm(job_emb) + 1e-8
+    cosine_sim = np.dot(cv_emb, job_emb) / norm_product
+
+    # Structured features
     struct_feats = get_structured_features(nlp_data, job_hard_reqs)
 
-    # Concatenate all features
-    feature_vector = np.concatenate([tfidf_feats, bert_feats, struct_feats])
+    # Concatenate: CV + Job + Interaction + Difference + Similarity + Structured
+    feature_vector = np.concatenate([
+        cv_emb,                        # 384
+        job_emb,                       # 384
+        cv_emb * job_emb,             # 384 element-wise interaction
+        np.abs(cv_emb - job_emb),     # 384 absolute difference
+        [cosine_sim],                  # 1
+        struct_feats,                  # 12
+    ])
 
-    logger.info(
-        f"Feature vector built: {len(feature_vector)} dims "
-        f"(TF-IDF={len(tfidf_feats)}, BERT={len(bert_feats)}, "
-        f"Structured={len(struct_feats)})"
-    )
-
+    logger.info(f"Feature vector: {len(feature_vector)} dims (BERT + structured)")
     return feature_vector
 
 
-def save_tfidf_vectorizer(vectorizer):
-    """Save trained TF-IDF vectorizer for reuse."""
-    with open(TFIDF_PATH, "wb") as f:
-        pickle.dump(vectorizer, f)
-    logger.info(f"TF-IDF vectorizer saved to {TFIDF_PATH}")
+def build_feature_vector_for_training(cv_text: str) -> np.ndarray:
+    """
+    Build feature vector for Category+Resume training format.
+    Uses only CV embedding + no job text needed.
+    Returns 384 dims.
+    """
+    return get_bert_embeddings(cv_text)
