@@ -28,21 +28,12 @@ class CandidateApplyView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         application = serializer.save()
 
-        # Run scoring — try Celery first, fallback to sync
-        scoring_method = "sync"
+        # Run scoring directly (skip Celery on macOS)
         try:
-            from ml_engine.tasks import score_application
-            score_application.delay(application.id)
-            scoring_method = "async (Celery)"
-        except Exception:
-            # Celery unavailable — run directly
-            try:
-                from ml_engine.pipeline import run_scoring_pipeline
-                run_scoring_pipeline(application.id)
-                scoring_method = "sync (direct)"
-            except Exception as e:
-                # Scoring failed but application is saved
-                scoring_method = f"failed: {e}"
+            from ml_engine.pipeline import run_scoring_pipeline
+            run_scoring_pipeline(application.id)
+        except Exception as e:
+            print(f"Scoring error: {e}")
 
         return Response(
             {
