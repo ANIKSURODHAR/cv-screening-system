@@ -14,25 +14,21 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 MODEL_WEIGHTS = {
-    "logistic_regression": 0.08,
-    "naive_bayes": 0.07,
-    "knn": 0.08,
-    "decision_tree": 0.09,
-    "random_forest": 0.15,
-    "svm": 0.14,
-    "xgboost": 0.22,
-    "autogluon": 0.17,
+    "logistic_regression": 0.10,
+    "naive_bayes": 0.10,
+    "knn": 0.10,
+    "random_forest": 0.20,
+    "svm": 0.15,
+    "xgboost": 0.35,
 }
 
 MODEL_FILES = {
     "logistic_regression": "logistic_regression.pkl",
     "naive_bayes": "naive_bayes.pkl",
     "knn": "knn.pkl",
-    "decision_tree": "decision_tree.pkl",
     "random_forest": "random_forest.pkl",
     "svm": "svm.pkl",
     "xgboost": "xgboost.pkl",
-    "autogluon": "autogluon.pkl",
 }
 
 _model_cache = {}
