@@ -1,16 +1,18 @@
 """
-Candidate application views — apply, list, score details.
-Scoring runs synchronously (direct) or via Celery (if available).
+Views for candidate applications + notifications.
 """
 from rest_framework import generics, status, permissions
+from rest_framework.decorators import api_view, permission_classes as perm
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .models import Application, ScreeningScore
+from .models import Application, ScreeningScore, Notification
 from .serializers import (
     ApplicationListSerializer,
     ApplicationDetailSerializer,
     ApplicationCreateSerializer,
     ApplicationStatusSerializer,
+    NotificationSerializer,
 )
 from accounts.permissions import IsAdmin, IsRecruiter, IsCandidate, IsAdminOrRecruiter
 
@@ -18,8 +20,6 @@ from accounts.permissions import IsAdmin, IsRecruiter, IsCandidate, IsAdminOrRec
 # ─── Candidate Views ─────────────────────────────────────────
 
 class CandidateApplyView(generics.CreateAPIView):
-    """POST /api/candidates/apply/ — Apply to a job with CV."""
-
     serializer_class = ApplicationCreateSerializer
     permission_classes = [IsCandidate]
 
@@ -28,7 +28,7 @@ class CandidateApplyView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         application = serializer.save()
 
-        # Run scoring directly (skip Celery on macOS)
+        # Run scoring directly
         try:
             from ml_engine.pipeline import run_scoring_pipeline
             run_scoring_pipeline(application.id)
@@ -36,60 +36,42 @@ class CandidateApplyView(generics.CreateAPIView):
             print(f"Scoring error: {e}")
 
         return Response(
-            {
-                "message": "Application submitted! AI scoring in progress...",
-                "application_id": application.id,
-                "scoring_method": scoring_method,
-            },
+            {"message": "Application submitted!", "application_id": application.id},
             status=status.HTTP_201_CREATED,
         )
 
 
 class CandidateApplicationsView(generics.ListAPIView):
-    """GET /api/candidates/my-applications/"""
-
     serializer_class = ApplicationListSerializer
     permission_classes = [IsCandidate]
 
     def get_queryset(self):
-        return Application.objects.filter(
-            candidate=self.request.user
-        ).select_related("job", "score")
+        return Application.objects.filter(candidate=self.request.user).select_related("job", "score")
 
 
 class CandidateApplicationDetailView(generics.RetrieveAPIView):
-    """GET /api/candidates/my-applications/<id>/"""
-
     serializer_class = ApplicationDetailSerializer
     permission_classes = [IsCandidate]
 
     def get_queryset(self):
-        return Application.objects.filter(
-            candidate=self.request.user
-        ).select_related("job", "cv_text", "score")
+        return Application.objects.filter(candidate=self.request.user).select_related("job", "cv_text", "score")
 
 
 # ─── Recruiter Views ─────────────────────────────────────────
 
 class RecruiterApplicantsView(generics.ListAPIView):
-    """GET /api/candidates/job/<job_id>/applicants/"""
-
     serializer_class = ApplicationListSerializer
     permission_classes = [IsAdminOrRecruiter]
 
     def get_queryset(self):
         job_id = self.kwargs["job_id"]
-        qs = Application.objects.filter(
-            job_id=job_id
-        ).select_related("candidate", "job", "score")
+        qs = Application.objects.filter(job_id=job_id).select_related("candidate", "job", "score")
         if self.request.user.is_recruiter:
             qs = qs.filter(job__recruiter=self.request.user)
         return qs.order_by("-score__overall_score")
 
 
 class RecruiterApplicantDetailView(generics.RetrieveAPIView):
-    """GET /api/candidates/applicant/<id>/"""
-
     serializer_class = ApplicationDetailSerializer
     permission_classes = [IsAdminOrRecruiter]
 
@@ -101,8 +83,6 @@ class RecruiterApplicantDetailView(generics.RetrieveAPIView):
 
 
 class RecruiterUpdateStatusView(generics.UpdateAPIView):
-    """PATCH /api/candidates/applicant/<id>/status/"""
-
     serializer_class = ApplicationStatusSerializer
     permission_classes = [IsAdminOrRecruiter]
 
@@ -112,17 +92,80 @@ class RecruiterUpdateStatusView(generics.UpdateAPIView):
             qs = qs.filter(job__recruiter=self.request.user)
         return qs
 
+    def perform_update(self, serializer):
+        application = serializer.save()
+        st = application.status
+        job_title = application.job.title
+        company = application.job.company
+
+        if st == "shortlisted":
+            Notification.objects.create(
+                user=application.candidate,
+                title=f"Shortlisted for {job_title}!",
+                message=f"Congratulations! You've been shortlisted for '{job_title}' at {company}. The recruiter was impressed with your profile!",
+                notification_type="shortlisted",
+                application=application,
+            )
+        elif st == "rejected":
+            Notification.objects.create(
+                user=application.candidate,
+                title=f"Update: {job_title}",
+                message=f"Your application for '{job_title}' at {company} has been reviewed. Unfortunately, the team decided to move forward with other candidates. Check your score details for improvement tips!",
+                notification_type="rejected",
+                application=application,
+            )
+        elif st == "hired":
+            Notification.objects.create(
+                user=application.candidate,
+                title=f"Hired for {job_title}!",
+                message=f"Amazing news! You've been selected for '{job_title}' at {company}. Congratulations!",
+                notification_type="hired",
+                application=application,
+            )
+
 
 # ─── Admin Views ──────────────────────────────────────────────
 
 class AdminAllApplicationsView(generics.ListAPIView):
-    """GET /api/candidates/admin/all/"""
-
     serializer_class = ApplicationListSerializer
     permission_classes = [IsAdmin]
     filterset_fields = ["status", "job"]
 
     def get_queryset(self):
-        return Application.objects.all().select_related(
-            "candidate", "job", "score"
-        )
+        return Application.objects.all().select_related("candidate", "job", "score")
+
+
+# ─── Notification Views ──────────────────────────────────────
+
+class NotificationListView(generics.ListAPIView):
+    serializer_class = NotificationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Notification.objects.filter(user=self.request.user)
+
+
+@api_view(["POST"])
+@perm([IsAuthenticated])
+def mark_notification_read(request, pk):
+    try:
+        n = Notification.objects.get(id=pk, user=request.user)
+        n.is_read = True
+        n.save()
+        return Response({"status": "read"})
+    except Notification.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+
+@api_view(["POST"])
+@perm([IsAuthenticated])
+def mark_all_read(request):
+    Notification.objects.filter(user=request.user, is_read=False).update(is_read=True)
+    return Response({"status": "all read"})
+
+
+@api_view(["GET"])
+@perm([IsAuthenticated])
+def unread_count(request):
+    count = Notification.objects.filter(user=request.user, is_read=False).count()
+    return Response({"count": count})

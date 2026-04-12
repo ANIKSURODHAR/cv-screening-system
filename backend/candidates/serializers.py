@@ -4,8 +4,14 @@ Serializers for Application, CVText, and ScreeningScore.
 from rest_framework import serializers
 from django.conf import settings
 
-from .models import Application, CVText, ScreeningScore
+from .models import Application, CVText, ScreeningScore, Notification
 from jobs.serializers import JobListSerializer
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Notification
+        fields = ["id", "title", "message", "notification_type", "is_read", "application", "created_at"]
 
 
 class CVTextSerializer(serializers.ModelSerializer):

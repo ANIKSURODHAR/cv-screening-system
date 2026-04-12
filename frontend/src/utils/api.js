@@ -100,6 +100,11 @@ export const candidatesAPI = {
   updateStatus: (id, data) => api.patch(`/candidates/applicant/${id}/status/`, data),
   // Admin
   getAllApplications: (params) => api.get("/candidates/admin/all/", { params }),
+  // Notifications
+  getNotifications: () => api.get("/candidates/notifications/"),
+  markRead: (id) => api.post(`/candidates/notifications/${id}/read/`),
+  markAllRead: () => api.post("/candidates/notifications/read-all/"),
+  unreadCount: () => api.get("/candidates/notifications/count/"),
 };
 
 // ─── ML API ──────────────────────────────────────────────────

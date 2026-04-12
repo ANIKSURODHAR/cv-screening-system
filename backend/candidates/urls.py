@@ -12,4 +12,9 @@ urlpatterns = [
     path("applicant/<int:pk>/status/", views.RecruiterUpdateStatusView.as_view(), name="applicant-status"),
     # Admin
     path("admin/all/", views.AdminAllApplicationsView.as_view(), name="admin-applications"),
+    # Notifications
+    path("notifications/", views.NotificationListView.as_view(), name="notifications"),
+    path("notifications/<int:pk>/read/", views.mark_notification_read, name="notification-read"),
+    path("notifications/read-all/", views.mark_all_read, name="notifications-read-all"),
+    path("notifications/count/", views.unread_count, name="notification-count"),
 ]
