@@ -9,14 +9,22 @@ const P = {
 };
 
 export default function RegisterPage() {
-  const [form, setForm] = useState({ username:"", email:"", password:"", password2:"", first_name:"", last_name:"", role:"candidate" });
+  const [form, setForm] = useState({
+  username:"",
+  email:"",
+  password:"",
+  password_confirm:"",
+  first_name:"",
+  last_name:"",
+  role:"candidate"
+});
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
   const handleSubmit = async (e) => {
     e.preventDefault(); setError("");
-    if (form.password !== form.password2) { setError("Passwords do not match"); return; }
+    if (form.password !== form.password_confirm) { setError("Passwords do not match"); return; }
     setLoading(true);
     try {
       await authAPI.register(form);
@@ -98,7 +106,8 @@ export default function RegisterPage() {
               </div>
               <div style={{ flex:1 }}>
                 <label style={{ display:"block", fontSize:12, color:P.dimText, marginBottom:6 }}>Confirm</label>
-                <input value={form.password2} onChange={e => upd("password2", e.target.value)} placeholder="••••••••" type="password" required
+
+                <input value={form.password_confirm} onChange={e => upd("password_confirm", e.target.value)} placeholder="••••••••" type="password" required
                   style={{ width:"100%", padding:"12px 16px", borderRadius:12, border:`1.5px solid ${P.inputBorder}`, background:P.inputBg, color:P.dark, fontSize:14, fontFamily:"'DM Sans'" }} />
               </div>
             </div>
